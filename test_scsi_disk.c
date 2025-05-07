@@ -1,5 +1,6 @@
 #include "readdisk.h"
 
+// 测试代码 - 主程序
 void main() {
     char driveLetter = 'D';
     HANDLE hDevice;
@@ -8,9 +9,9 @@ void main() {
     //用sprintf构建device path
     char devicePath[10];
     sprintf(devicePath, "\\\\.\\%c:", driveLetter);
-
-     //用CreateFile来打开输入的盘符
-     hDevice = CreateFile(
+    
+    //用CreateFile来打开输入的盘符
+    hDevice = CreateFile(
         devicePath, 
         GENERIC_READ | GENERIC_WRITE, 
         FILE_SHARE_READ | FILE_SHARE_WRITE, 
@@ -26,13 +27,25 @@ void main() {
         return;
 
     }
+    
+    read_disk(hDevice, buffer, sizeof(buffer), driveLetter); 
+    // ovewrite_partition_bootsector(hDevice);
+    // InitializeFSINFO(hDevice);   
+    // overwrite_GPT_partition_entry(hDevice);
+    
+    // 关闭设备handle，并退出
+    CloseHandle(hDevice);
+    
+}
 
-    // 从0号扇区开始读1个扇区
-    if(read_disk_direct(hDevice, buffer, 0, 1)) {
+// 测试代码
+void read_disk(HANDLE hDevice, BYTE * buffer, int buffer_size, char driveLetter){
+     // 从0号扇区开始读1个扇区
+     if(read_disk_direct(hDevice, buffer, 0, 1)) {
 
         unsigned char file_system_type;
         
-        print_rawdata((unsigned char*)buffer, sizeof(buffer));
+        print_rawdata((unsigned char*)buffer, buffer_size);
 
         // 解析MBR数据
         ProtectiveMBR* mbr = (ProtectiveMBR*)buffer;  
@@ -76,27 +89,32 @@ void main() {
 
                     print_rawdata((unsigned char*)dbr_buffer, sizeof(dbr_buffer));
 
-                    parse_gpt_header((uint8_t *)dbr_buffer);
+                    parse_gpt_header((GptHeader *)dbr_buffer);
 
                     GptHeader* header = (GptHeader*)dbr_buffer;
                     
                     uint32_t entries_per_sector = 512 / header->partition_entry_size;
 
-                    uint32_t valid_entries_in_lba2 = (header->num_partition_entries < entries_per_sector) 
-                                   ? header->num_partition_entries 
-                                   : entries_per_sector;
+                    uint32_t valid_entries_in_lba2 = (header->num_partition_entries < entries_per_sector)  // 比较GPT header里num_partition_entries的值
+                                   ? header->num_partition_entries                                         // 和计算得到的GPT扇区可以容纳的最大partition 
+                                   : entries_per_sector;                                                   // entries数，并返回其中较小那个
+                
+                    printf("  -----------Parse GPT Partition Info------------\n");
+
+                    printf("  Total %d valid partitions.\n", valid_entries_in_lba2);
 
                     const GptPartitionEntry *entry = (GptPartitionEntry *)&dbr_buffer[512];
 
-                    print_parse_gpt_partitions(entry, valid_entries_in_lba2);
-
-                    printf("  -----------------------------------------------\n");
+                    print_parse_gpt_partitions(entry, valid_entries_in_lba2); 
+                    
+                    printf("  ---------Parse Partition BootSector Info----------\n");
 
                     for (uint32_t i = 0; i < valid_entries_in_lba2; i++, entry++) {
 
-                        parse_partition_data(hDevice, entry->starting_lba, entry->ending_lba);
+                        printf("  Partition %d: \n", i);
 
-                        printf("  -----------------------------------------------\n");
+                        parse_partition_data(hDevice, entry->starting_lba, entry->ending_lba);
+                        
                     }
 
                 }
@@ -106,18 +124,204 @@ void main() {
                 printf("Drive %c: Partition format is unrecognized or invalid\n", driveLetter);
         }       
 
-    } 
+    }else{
+        printf("Failed to read MBR structure from sector 0.");
+    }
+}
 
-    // 关闭设备handle，并退出
-     CloseHandle(hDevice);
+// 测试代码 - 更新 GPT Header 和 Partition Entry
+void overwrite_GPT_partition_entry(HANDLE hDevice) {
+    // 在第一个分区修复分区表
+    // HANDLE hDevice;
+    BYTE buffer[512*2];
+
+    // //用CreateFile来打开输入的盘符
+    // hDevice = CreateFile(
+    //     devicePath, 
+    //     GENERIC_READ | GENERIC_WRITE, 
+    //     FILE_SHARE_READ | FILE_SHARE_WRITE, 
+    //     NULL, 
+    //     OPEN_EXISTING, 
+    //     0, 
+    //     NULL
+    // );
+    
+    // 读取GPT Head，在第二扇区
+    if (read_disk_direct(hDevice, buffer, 1, 2))
+    {
+        GptHeader* header =  (GptHeader*) buffer;
+
+        header->num_partition_entries = 2;
+
+        GptPartitionEntry *entry = (GptPartitionEntry *)&buffer[512];
+
+        entry->attributes = GPT_ATTR_BASIC_DATA_NORMAL;
+
+        // 计算分区条目数组CRC32
+        header->partition_entry_crc32 = CalculateCRC32(
+            entry, header->num_partition_entries* header->partition_entry_size);
+
+        // 重新计算备份头CRC
+        header->header_crc32 = 0;
+
+        header->header_crc32 = CalculateCRC32((void *)header, header->header_size);
+
+        printf("head-crc32: %u \n", header->header_crc32);
+
+        // printf("-----------rawdata after update----------------\n");
+
+        // print_rawdata(buffer, sizeof(buffer));
+
+        printf("-----------Parse GPT Header----------------\n");
+
+        parse_gpt_header((GptHeader*)buffer);
+
+        printf("  ---------Parse Partition BootSector Info----------\n");
+
+        entry = (GptPartitionEntry *)&buffer[512];
+
+        print_parse_gpt_partitions(entry, header->num_partition_entries);
+
+        // 写入GPT Header, Partition Entry
+        if (write_disk_direct(hDevice, buffer, 1, 1)){
+
+            printf("Successfully write into GPT header. \n");
+            
+            BYTE head_buffer[512];
+
+            if (read_disk_direct(hDevice, head_buffer, 1, 1)) {
+                
+                GptHeader* header =  (GptHeader*) head_buffer;
+
+                parse_gpt_header((GptHeader*)buffer);
+            }       
+
+        } 
+
+        if (write_disk_direct(hDevice, &buffer[512], 2, 1)){
+
+            printf("Successfully write into GPT entries. \n");
+
+            BYTE entry_buffer[512];
+
+            if (read_disk_direct(hDevice, entry_buffer, 2, 1)) {
+
+                GptPartitionEntry *entry = (GptPartitionEntry *)entry_buffer;
+
+                print_parse_gpt_partitions(entry, 4);
+            }     
+
+        } 
+            
+    }
+
+    // CloseHandle(hDevice);
+
+    //用CreateFile来打开输入的盘符
+    // hDevice = CreateFile(
+    //     devicePath, 
+    //     GENERIC_READ | GENERIC_WRITE, 
+    //     FILE_SHARE_READ | FILE_SHARE_WRITE, 
+    //     NULL, 
+    //     OPEN_EXISTING, 
+    //     0, 
+    //     NULL
+    // );
+
+    // CloseHandle(hDevice);
+}
+
+// 测试代码 - 写入FAT32 BootSector
+void ovewrite_partition_bootsector(HANDLE hDevice){
+    // 在第一个分区修复分区表, 该分区的起始和截至Sector
+    int partitionStart = 64, partitionEnd = 9291427;
+
+    FAT32_bootSector fat32_bootsector;
+
+    // 将FAT32的boot sector设置成全0
+    memset(&fat32_bootsector, 0, sizeof(FAT32_bootSector));
+
+    // 跳转指令和OEM名称
+    fat32_bootsector.jmpBoot[0] = 0xEB;
+    fat32_bootsector.jmpBoot[1] = 0x58;
+    fat32_bootsector.jmpBoot[2] = 0x90;
+    memcpy(fat32_bootsector.OEMName, "MSDOS5.0", 8);
+
+    // 基本参数
+    fat32_bootsector.bytesPerSector = 512;
+    fat32_bootsector.sectorsPerCluster = CalculateSectorsPerCluster(fat32_bootsector.totalSectors32);
+    fat32_bootsector.reservedSectors = 32; 
+    fat32_bootsector.numFATs = 2;
+    fat32_bootsector.rootEntries  = 0;      // FAT32必须为0
+    fat32_bootsector.totalSectors16  = 0;   // FAT32必须为0
+    fat32_bootsector.mediaType = 0xF8;      // USB设备也使用0xF8
+    fat32_bootsector.sectorsPerFAT16 = 0;   // FAT32必须为0
+    fat32_bootsector.sectorsPerTrack = 63;
+    fat32_bootsector.numHeads = 255; 
+    fat32_bootsector.hiddenSectors = partitionStart; 
+    fat32_bootsector.totalSectors32 = partitionEnd - partitionStart + 1;
+
+    // FAT32扩展BPB
+    fat32_bootsector.sectorsPerFAT32 = CalculateSectorsPerFAT(fat32_bootsector.totalSectors32, fat32_bootsector.sectorsPerCluster);
+    fat32_bootsector.extFlags = 0;
+    fat32_bootsector.fsVersion = 0;
+    fat32_bootsector.rootCluster = 2;       // 根目录通常从簇2开始
+    fat32_bootsector.fsInfoSector = 1;      // FSINFO通常在保留区的第1扇区
+    fat32_bootsector.backupBootSector = 6;  // 备份引导扇区通常在保留区的第6扇区
+
+
+    // 其他字段
+    fat32_bootsector.driveNumber = 0x80; 
+    fat32_bootsector.bootSig = 0x29; 
+    fat32_bootsector.volumeID = GetTickCount(); // 简单随机数
+    memcpy(fat32_bootsector.volumeLabel, "DEECHEAN  ", 11);
+    memcpy(fat32_bootsector.fsType, "FAT32   ", 8);
+
+    // 引导扇区签名
+    fat32_bootsector.signature = 0xAA55;
+
+    // 写入主引导扇区
+    if (write_disk_direct(hDevice, (BYTE *)&fat32_bootsector, partitionStart, 1)){
+        printf("Successfully write into boot sector. ");
+    };
+
+    Sleep(10);
+
+    // 写入备份引导扇区(位置6)
+    if (write_disk_direct(hDevice, (BYTE *)&fat32_bootsector, partitionStart + 6, 1)){
+        printf("Successfully write into backup boot sector. ");
+    };
+
+    int fatStart = partitionStart + fat32_bootsector.reservedSectors;
+}
+
+// 测试代码 - 写入FAT32 文件系统中的FSINFO结构
+void InitializeFSINFO(HANDLE hDevice){
+    // 在第一个分区修复文件系统
+    int partitionStart = 64, partitionEnd = 9291427;
+    FAT32_FSINFO fsinfo;
+
+    memset(&fsinfo, 0, sizeof(FAT32_FSINFO));
+    
+    fsinfo.leadSig = 0x41615252;
+    fsinfo.structSig = 0x61417272;
+    fsinfo.freeCount = 0xFFFFFFFF;
+    fsinfo.nextFree = 0xFFFFFFFF;
+    fsinfo.trailSig = 0xAA550000;
+    
+    if (write_disk_direct(hDevice, (BYTE *)&fsinfo, partitionStart+1, 1)){
+
+        printf("Successfully write FSINFO structure into sector %d. \n", partitionStart+1);
+
+    };
 }
 
 // 按照起始扇区，结束扇区从磁盘直接读取二进制数据
 BOOL read_disk_direct(
     HANDLE hDevice,  //设备句柄，需要先用CreateFile获取设备句柄
-    BYTE buffer[],   //数据存储空间的指针
-    int posSector,  //从第posSector个扇区开始读，扇区编号从0开始
-    int readSectors //读readSectors个扇区
+    BYTE buffer[],   //数据存储空间的指针， 返回读取的数据
+    int posSector,   //从第posSector个扇区开始读，扇区编号从0开始
+    int readSectors  //读readSectors个扇区
 ) {
     DWORD bytesReturn;
     ULONG length = 0;
@@ -171,17 +375,19 @@ BOOL read_disk_direct(
 }
 
 // 按照起始扇区，结束扇区往磁盘直接写入二进制数据
-BOOL write_disk_direct(HANDLE hDevice, BYTE buffer[]) {
+BOOL write_disk_direct(
+    HANDLE hDevice,     //设备句柄，需要先用CreateFile获取设备句柄
+    BYTE buffer[],      //需要被写入数据存储空间的指针
+    int posSector,      //从第posSector个扇区开始写，扇区编号从0开始
+    int numSectors      //写numSectors个扇区
+) {
     DWORD bytesReturn;
     ULONG length = 0;
     BOOL bResult;
 
     SCSI_PASS_THROUGH_DIRECT_WITH_BUFFER  sptdwb;
-
-    int posSector = 0;   //从第0个扇区开始写，扇区编号从0开始
-    int readSectors = 1 ; //写1个扇区
-
     ZeroMemory(&sptdwb, sizeof(SCSI_PASS_THROUGH_DIRECT_WITH_BUFFER));
+
     sptdwb.sptd.Length = sizeof(SCSI_PASS_THROUGH_DIRECT);
     sptdwb.sptd.PathId = 0;
     sptdwb.sptd.TargetId =1;
@@ -189,18 +395,21 @@ BOOL write_disk_direct(HANDLE hDevice, BYTE buffer[]) {
     sptdwb.sptd.CdbLength = 10;
     sptdwb.sptd.DataIn = SCSI_IOCTL_DATA_OUT;
     sptdwb.sptd.SenseInfoLength = 24;
-    sptdwb.sptd.DataTransferLength = 512 * readSectors;
-    sptdwb.sptd.TimeOutValue = 2;
+    sptdwb.sptd.DataTransferLength = 512 * numSectors;
+    sptdwb.sptd.TimeOutValue = 32;
     sptdwb.sptd.DataBuffer = buffer;
     sptdwb.sptd.SenseInfoOffset = offsetof(SCSI_PASS_THROUGH_DIRECT_WITH_BUFFER,ucSenseBuf);
     // 设置SCSI Command
-    sptdwb.sptd.Cdb[0] = 0x0A ;          //写数据命令
-    sptdwb.sptd.Cdb[2] = (posSector>>24)&0xff; //从第posSector开始读， 2-5 是digital block address
+    sptdwb.sptd.Cdb[0] = 0x2A;                  // 写数据命令 WRITE(10)
+    sptdwb.sptd.Cdb[1] = 0x00;                  // 该字段前3位是WRPROTECT， 设为0表示 No protection information received from application client to check
+    sptdwb.sptd.Cdb[2] = (posSector>>24)&0xff;  // 从第posSector开始读， 2-5 是digital block address
     sptdwb.sptd.Cdb[3] = (posSector>>16)&0xff; 
     sptdwb.sptd.Cdb[4] = (posSector>>8)&0xff;
     sptdwb.sptd.Cdb[5] = posSector&0xff;
-    sptdwb.sptd.Cdb[7] = (readSectors>>8)&0xff;
-    sptdwb.sptd.Cdb[8] = readSectors&0xff; //读readSectors个扇区 ,注意这个值一定要与DataTransferLength相对应
+    sptdwb.sptd.Cdb[6] = 0x00;                  // 高三位保留，低五位GROUP NUMBER field.
+    sptdwb.sptd.Cdb[7] = (numSectors>>8)&0xff;
+    sptdwb.sptd.Cdb[8] = numSectors&0xff;       // 读readSectors个扇区 ,注意这个值一定要与DataTransferLength相对应
+    sptdwb.sptd.Cdb[9] = 0x00;                  // Control
 
     length = sizeof(SCSI_PASS_THROUGH_DIRECT_WITH_BUFFER);
 
@@ -216,9 +425,9 @@ BOOL write_disk_direct(HANDLE hDevice, BYTE buffer[]) {
     );
 
     if (bResult) {
-        printf("Read success.\n");
+        printf("Write success.\n");
     }else{
-        printf("Open device IO control failed: %lu\n", GetLastError());
+        printf("Fail to write data: %lu\n", GetLastError());
     }
 
     return bResult;
@@ -349,9 +558,8 @@ const char* get_partition_type(unsigned char type) {
 }
 
 // 解析GPT头
-void parse_gpt_header(const uint8_t *sector) {
-    GptHeader *header = (GptHeader *)sector;
-
+void parse_gpt_header(const GptHeader *header) {
+    
     // 检查签名
     if (memcmp(header->signature, "EFI PART", 8) != 0) {
         printf("Invalid GPT signature.\n");
@@ -392,13 +600,13 @@ void print_parse_gpt_partitions(const GptPartitionEntry *entry, uint32_t count) 
 
         printf("Partition %u:\n", i + 1);
         
-        printf("  partition_type_guid: \n");
+        printf("  partition_type_guid: ");
         
         print_partition_guid_type(entry->partition_type_guid);
 
         printf("\n");   
                 
-        printf("  unique_partition_guid: \n");
+        printf("  unique_partition_guid: ");
         for (int i = 0; i < 16; i++) {
             printf("%02X ", entry->unique_partition_guid[i]);
         }
@@ -408,12 +616,13 @@ void print_parse_gpt_partitions(const GptPartitionEntry *entry, uint32_t count) 
 
         printf("  ending_lba: %lu\n", entry->ending_lba);
 
-        printf("  Size: %lu sectors\n", entry->ending_lba - entry->starting_lba + 1);
-
-        printf("  Size: %0.2f Gibs\n", ((float)(entry->ending_lba - entry->starting_lba + 1))*512/1024/1024/1024);
-
-        printf("  partition_name: \n");
-        printf("  ");
+        printf("  Size: %d sectors, %0.2f Gibs\n", 
+            entry->ending_lba - entry->starting_lba + 1, 
+            ((float)(entry->ending_lba - entry->starting_lba + 1))*512/1024/1024/1024);
+        
+        printf("  attributes: %lu \n", entry->attributes);
+        
+        printf("  partition_name: ");
         for (int i = 0; i < 72; i++) {
             unsigned char c = entry->partition_name[i];
             putchar((c >= 32 && c <= 126) ? c : '.');
@@ -463,6 +672,8 @@ void print_partition_guid_type(const uint8_t binary_guid[16]){
 void parse_partition_data(HANDLE hDevice, int posSector,  int readSectors){
     
     BYTE bootSector[512];
+    FAT32_bootSector fat32_bootSector;
+
     // 读取第一个扇区(分区引导扇区)
     read_disk_direct(hDevice, bootSector, posSector, 1);
 
@@ -472,34 +683,70 @@ void parse_partition_data(HANDLE hDevice, int posSector,  int readSectors){
 
     print_partition_type(filesystem);
 
+    if (filesystem == FAT32){
+
+        parse_FAT32_partition(bootSector, &fat32_bootSector);
+
+        printf("\tbytesPerSector: %u \n", fat32_bootSector.bytesPerSector);
+
+    }else{
+
+        parse_FAT32_partition(bootSector, &fat32_bootSector);
+
+        printf("\tbytesPerSector: %u \n", fat32_bootSector.bytesPerSector);
+
+    } 
 }
+
+
+void parse_FAT32_partition(BYTE * bootSector, FAT32_bootSector * fat32_bootSector) {    
+
+    printf("Size of FAT32_bootSector: %d \n", sizeof(FAT32_bootSector));
+    
+    memcpy((void *)fat32_bootSector, (const void *)bootSector, sizeof(FAT32_bootSector));
+}
+
+// 计算每簇扇区数(优化版)
+BYTE CalculateSectorsPerCluster(DWORD totalSectors) {
+    DWORD sizeMB = (totalSectors * 512) / (1024 * 1024);
+    
+    if (sizeMB < 260) return 1;
+    else if (sizeMB < 8192) return 8;    // 4KB簇(最常用)
+    else if (sizeMB < 16384) return 16;  // 8KB簇
+    else if (sizeMB < 32768) return 32;  // 16KB簇
+    else return 64;                      // 32KB簇(最大)
+}
+
+// 计算FAT表大小
+DWORD CalculateSectorsPerFAT(DWORD totalSectors, BYTE sectorsPerCluster) {
+    DWORD dataSectors = totalSectors - 32; // 保留扇区
+    DWORD totalClusters = dataSectors / sectorsPerCluster;
+    DWORD fatSize = (totalClusters * 4 + 511) / 512; // 每个FAT项4字节
+    
+    // 对齐到簇边界
+    return ((fatSize + sectorsPerCluster - 1) / sectorsPerCluster) * sectorsPerCluster;
+}
+
+DWORD CalculateCRC32(const void* data, size_t length) {
+    // 动态加载ntdll中的函数
+    typedef DWORD (WINAPI *PCRC32)(DWORD InitialCrc, const BYTE* Buffer, INT Length);
+
+    static PCRC32 pCRC32  = NULL;
+    if (!pCRC32) {
+        HMODULE hNtdll = GetModuleHandleW(L"ntdll.dll");
+        if (hNtdll) {
+            pCRC32  = (PCRC32)GetProcAddress(hNtdll, "RtlComputeCrc32");
+        }
+    }
+
+    if (pCRC32) {
+        return pCRC32(0, (const BYTE*)data, (INT)length);
+    }
+
+    return 0;
+}
+
 /*
-
-void ParseFAT32(HANDLE hDevice, DWORD partitionStart) {
-    BYTE buffer[512];
-    FAT32_INFO fat32Info;
-    
-    // 读取引导扇区
-    ReadSectors(hDevice, partitionStart, 1, buffer);
-    
-    fat32Info.bytesPerSector = *(WORD*)(buffer + 11);
-    fat32Info.sectorsPerCluster = buffer[13];
-    fat32Info.reservedSectors = *(WORD*)(buffer + 14);
-    fat32Info.numFATs = buffer[16];
-    fat32Info.sectorsPerFAT = *(DWORD*)(buffer + 36);
-    fat32Info.rootCluster = *(DWORD*)(buffer + 44);
-    
-    // 读取根目录
-    DWORD fatStart = partitionStart + fat32Info.reservedSectors;
-    DWORD dataStart = fatStart + (fat32Info.numFATs * fat32Info.sectorsPerFAT);
-    DWORD rootDirSector = dataStart + ((fat32Info.rootCluster - 2) * fat32Info.sectorsPerCluster);
-    
-    ReadSectors(hDevice, rootDirSector, 1, buffer);
-    
-    // 解析目录条目
-    ParseFATDirectory(buffer, 512);
-}
-
 void ParseFATDirectory(BYTE* buffer, DWORD size) {
     for (DWORD i = 0; i < size; i += 32) {
         BYTE* entry = buffer + i;

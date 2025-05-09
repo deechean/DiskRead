@@ -32,7 +32,7 @@ DEFINE_GUID(PARTITION_SYSTEM_GUID, 0xc12a7328, 0xf81f, 0x11d2, 0xba, 0x4b, 0x00,
 DEFINE_GUID(PARTITION_MSFT_RESERVED_GUID, 0xe3c9e316, 0x0b5c, 0x4db8, 0x81, 0x7d, 0xf9, 0x2d, 0xf0, 0x02, 0x15, 0xae);
 
 #pragma pack(push, 1)
-// 分区表项结构
+// MBR分区表项结构
 typedef struct {
     unsigned char boot_flag;     // 引导标志(0x80=活动分区)
     unsigned char start_head;    // 起始磁头号
@@ -44,14 +44,14 @@ typedef struct {
     unsigned char end_cyl;       // 结束柱面号低8位
     unsigned int start_lba;      // 分区起始LBA(相对扇区号)
     unsigned int size_sectors;   // 分区大小(扇区数)
-} __attribute__((packed)) PartitionEntry;
+} __attribute__((packed)) MBRPartitionEntry;
 
 // 保护MBR结构
 typedef struct {
     uint8_t boot_code[440];
     uint32_t disk_signature;
     uint16_t reserved;
-    PartitionEntry partitions[4];  // 使用之前定义的MBR分区表结构
+    MBRPartitionEntry partitions[4];  // 使用之前定义的MBR分区表结构
     uint16_t signature;
 } ProtectiveMBR;
 
@@ -90,6 +90,7 @@ typedef struct {
     uint8_t partition_name[72]; // UTF-16LE
 } __attribute__((packed)) GptPartitionEntry;
 
+//FAT32 BootSector
 typedef struct {
     // 第一部分：BIOS参数块(BPB)
     BYTE  jmpBoot[3];       // 0x00-0x02， 跳转指令(0xEB, 0x58, 0x90)
@@ -149,12 +150,14 @@ uint64_t get_last_lba(HANDLE hDevice);
 BOOL read_disk_direct(HANDLE hDevice, BYTE buffer[], int posSector, int readSectors);
 BOOL write_disk_direct(HANDLE hDevice, BYTE buffer[], int posSector, int numSectors);
 void print_rawdata(const unsigned char* boot_code, size_t size);
+// 读取MBR分区信息, 并打印有效分区
+int read_MBR_sector(HANDLE hDevice, ProtectiveMBR * mbr, int buffer_size);
 unsigned char check_file_system_from_bootsector(BYTE *buffer);
 void print_partition_type(unsigned char type);
 int check_disk_partition_style(ProtectiveMBR* mbr);
-void print_partition_info(const PartitionEntry* part, int index);
+void print_MBRPartition_info(const MBRPartitionEntry* part);
 const char* get_partition_type(unsigned char type);
-void parse_gpt_header(const GptHeader *sector);
+void read_parse_GPT_header(HANDLE hDevice, GptHeader *sector);
 void print_parse_gpt_partitions(const GptPartitionEntry *entry, uint32_t count);
 void print_partition_guid_type(const uint8_t binary_guid[16]);
 void parse_partition_data(HANDLE hDevice, int posSector,  int readSectors);

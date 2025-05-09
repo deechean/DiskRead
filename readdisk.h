@@ -7,6 +7,7 @@
 
 #include <initguid.h>
 
+
 #define SPT_SENSE_LENGTH 32
 
 #define FAT12 0x01
@@ -142,6 +143,7 @@ void read_disk(HANDLE hDevice, BYTE * buffer, int buffer_size, char driveLetter)
 void ovewrite_partition_bootsector(HANDLE hDevice);
 void InitializeFSINFO(HANDLE hDevice);
 void overwrite_GPT_partition_entry(HANDLE hDevice);
+uint64_t get_last_lba(HANDLE hDevice);
 
 // 读写磁盘方法
 BOOL read_disk_direct(HANDLE hDevice, BYTE buffer[], int posSector, int readSectors);

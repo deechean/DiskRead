@@ -27,7 +27,15 @@ void main() {
         return;
 
     }
+
     
+    // uint64_t last_lba = 15728639;
+    // if(read_disk_direct(hDevice, buffer, 9291427, 1)){
+
+    //     print_rawdata((unsigned char *)buffer, 512);
+
+    // }
+   
     read_disk(hDevice, buffer, sizeof(buffer), driveLetter); 
     // ovewrite_partition_bootsector(hDevice);
     // InitializeFSINFO(hDevice);   
@@ -51,8 +59,9 @@ void read_disk(HANDLE hDevice, BYTE * buffer, int buffer_size, char driveLetter)
         ProtectiveMBR* mbr = (ProtectiveMBR*)buffer;  
 
         // 判断分区格式
-        int partitionStyle = check_disk_partition_style(mbr);
-        
+        // int partitionStyle = check_disk_partition_style(mbr);
+        int partitionStyle = 0;
+
         switch (partitionStyle) {
             case 0:
                 printf("Drive %c: Disk is formatted with MBR\n", driveLetter);
@@ -129,106 +138,127 @@ void read_disk(HANDLE hDevice, BYTE * buffer, int buffer_size, char driveLetter)
     }
 }
 
+uint64_t get_last_lba(HANDLE hDevice){
+
+    DISK_GEOMETRY_EX disk_geometry = {0};
+    DWORD bytesReturned = 0;
+
+    if (DeviceIoControl(
+        hDevice,
+        IOCTL_DISK_GET_DRIVE_GEOMETRY_EX,
+        NULL,
+        0,
+        &disk_geometry,
+        sizeof(disk_geometry),
+        &bytesReturned,
+        NULL
+    )) {
+        uint64_t disk_size_in_bytes = disk_geometry.DiskSize.QuadPart;
+        uint64_t sector_size = disk_geometry.Geometry.BytesPerSector;
+        uint64_t last_lba = (disk_size_in_bytes / sector_size) - 1;
+
+        return last_lba;
+        
+    }else{
+        return 0;
+    }
+
+}
+
 // 测试代码 - 更新 GPT Header 和 Partition Entry
 void overwrite_GPT_partition_entry(HANDLE hDevice) {
     // 在第一个分区修复分区表
-    // HANDLE hDevice;
     BYTE buffer[512*2];
 
-    // //用CreateFile来打开输入的盘符
-    // hDevice = CreateFile(
-    //     devicePath, 
-    //     GENERIC_READ | GENERIC_WRITE, 
-    //     FILE_SHARE_READ | FILE_SHARE_WRITE, 
-    //     NULL, 
-    //     OPEN_EXISTING, 
-    //     0, 
-    //     NULL
-    // );
+    uint64_t last_lba_of_disk = 15728639;
+
+    memset(buffer, 0, 512*2);
     
-    // 读取GPT Head，在第二扇区
-    if (read_disk_direct(hDevice, buffer, 1, 2))
-    {
-        GptHeader* header =  (GptHeader*) buffer;
+    GptHeader* header =  (GptHeader*) buffer;
+    
+    memcpy(header->signature, "EFI PART", 8);            // 设置签名 "EFI PART"
 
-        header->num_partition_entries = 2;
+    header->revision = 0x00010000;                       // 设置修订版本 (通常为1.0.0)
 
-        GptPartitionEntry *entry = (GptPartitionEntry *)&buffer[512];
+    header->header_size = 92;                            // 设置头部大小 (通常92字节)
 
-        entry->attributes = GPT_ATTR_BASIC_DATA_NORMAL;
+    header->reserved = 0;                                // 保留字段必须为0
+    
+    header->my_lba = 1;                                  // 设置当前头的LBA位置 (主GPT头通常在LBA 1)
 
-        // 计算分区条目数组CRC32
-        header->partition_entry_crc32 = CalculateCRC32(
-            entry, header->num_partition_entries* header->partition_entry_size);
+    header->alternate_lba = last_lba_of_disk-33;         // GPT分区备份在磁盘最后空间，占据33个分区
+    
+    header->first_usable_lba = 34;                       // 设置第一个可用LBA (通常是34)
 
-        // 重新计算备份头CRC
-        header->header_crc32 = 0;
+    header->last_usable_lba = last_lba_of_disk-34;       // 设置最后一个可用LBA (alternate_lba - 33)
 
-        header->header_crc32 = CalculateCRC32((void *)header, header->header_size);
+    GUID disk_guid;                                      // 生成新的GUID   
+    
+    // CoCreateGuid(&disk_guid);
 
-        printf("head-crc32: %u \n", header->header_crc32);
+    memcpy(header->disk_guid, &disk_guid, 16);
+    
+    header->partition_entry_lba = 2;                     // 分区表项起始LBA (通常是2)
+    
+    header->num_partition_entries = 128;                 // 分区表项数量 (通常128)
 
-        // printf("-----------rawdata after update----------------\n");
+    header->partition_entry_size = 128;                  // 每个分区表项大小 (通常128字节)
 
-        // print_rawdata(buffer, sizeof(buffer));
+    header->header_crc32 = 0;                            // 重新计算备份头CRC
 
-        printf("-----------Parse GPT Header----------------\n");
+    header->header_crc32 = CalculateCRC32((void *)header, header->header_size);    
 
-        parse_gpt_header((GptHeader*)buffer);
+    GptPartitionEntry* entry = (GptPartitionEntry*)&buffer[512];
 
-        printf("  ---------Parse Partition BootSector Info----------\n");
+    memcpy(entry->partition_type_guid, &PARTITION_BASIC_DATA_GUID, 16); // 将分区类型设为Windows基本数据
 
-        entry = (GptPartitionEntry *)&buffer[512];
+    GUID partition_guid;                                    // 生成新的GUID   
+    
+    // CoCreateGuid(&partition_guid);
 
-        print_parse_gpt_partitions(entry, header->num_partition_entries);
+    memcpy(entry->unique_partition_guid, &partition_guid, 16);
 
-        // 写入GPT Header, Partition Entry
-        if (write_disk_direct(hDevice, buffer, 1, 1)){
+    entry->starting_lba = 64;                               // 分区的起始扇区
+    
+    entry->ending_lba = 9291427;                            // 分区的截至扇区
 
-            printf("Successfully write into GPT header. \n");
+    
+
+    entry->attributes = GPT_ATTR_BASIC_DATA_NORMAL;
+
+    // 计算分区条目数组CRC32
+    header->partition_entry_crc32 = CalculateCRC32(
+        entry, header->num_partition_entries* header->partition_entry_size);   
+
+    // printf("head-crc32: %u \n", header->header_crc32);
+
+    // printf("-----------rawdata after update----------------\n");
+
+    // print_rawdata(buffer, sizeof(buffer));
+
+    printf("-----------Parse GPT Header----------------\n");
+
+    parse_gpt_header((GptHeader*)buffer);
+
+    printf("  ---------Parse Partition BootSector Info----------\n");
+
+    entry = (GptPartitionEntry *)&buffer[512];
+
+    print_parse_gpt_partitions(entry, header->num_partition_entries);
+
+    // 写入GPT Header, Partition Entry
+    // if (write_disk_direct(hDevice, buffer, 1, 1)){
+
+    //     printf("Successfully write into GPT header. \n");
+
+    // } 
+
+    // if (write_disk_direct(hDevice, &buffer[512], 2, 1)){
+
+    //     printf("Successfully write into GPT entries. \n");
+
+    // } 
             
-            BYTE head_buffer[512];
-
-            if (read_disk_direct(hDevice, head_buffer, 1, 1)) {
-                
-                GptHeader* header =  (GptHeader*) head_buffer;
-
-                parse_gpt_header((GptHeader*)buffer);
-            }       
-
-        } 
-
-        if (write_disk_direct(hDevice, &buffer[512], 2, 1)){
-
-            printf("Successfully write into GPT entries. \n");
-
-            BYTE entry_buffer[512];
-
-            if (read_disk_direct(hDevice, entry_buffer, 2, 1)) {
-
-                GptPartitionEntry *entry = (GptPartitionEntry *)entry_buffer;
-
-                print_parse_gpt_partitions(entry, 4);
-            }     
-
-        } 
-            
-    }
-
-    // CloseHandle(hDevice);
-
-    //用CreateFile来打开输入的盘符
-    // hDevice = CreateFile(
-    //     devicePath, 
-    //     GENERIC_READ | GENERIC_WRITE, 
-    //     FILE_SHARE_READ | FILE_SHARE_WRITE, 
-    //     NULL, 
-    //     OPEN_EXISTING, 
-    //     0, 
-    //     NULL
-    // );
-
-    // CloseHandle(hDevice);
 }
 
 // 测试代码 - 写入FAT32 BootSector

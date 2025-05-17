@@ -1,6 +1,5 @@
 #include "readdisk.h"
 
-int overwrite_MBR_sector(HANDLE hDevice, ProtectiveMBR *mbr, int buffer_size);
 
 // 测试代码 - 主程序
 void main() {
@@ -29,7 +28,7 @@ void main() {
 
     }
 
-    ProtectiveMBR mbr;
+    
 
     int partitionStyle = read_MBR_sector(hDevice, &mbr, sizeof(ProtectiveMBR));
 
@@ -58,18 +57,8 @@ void main() {
     
 }
 
-int overwrite_MBR_sector(HANDLE hDevice, ProtectiveMBR *mbr, int buffer_size){
-   
-    // 写入GPT Header, Partition Entry
-    int bResult = write_disk_direct(hDevice, (BYTE *)mbr, 0, 1);
 
-    if(bResult){        
-        printf("Successfully write into MBR header. \n");
-    } 
-
-    return(bResult);
-}
-
+/*
 // 测试代码
 void read_disk(HANDLE hDevice, BYTE * buffer, int buffer_size, char driveLetter){
     // 从0号扇区开始读1个扇区
@@ -138,35 +127,10 @@ void read_disk(HANDLE hDevice, BYTE * buffer, int buffer_size, char driveLetter)
    }else{
        printf("Failed to read MBR structure from sector 0.");
    }
-}
+}*/
 
-uint64_t get_last_lba(HANDLE hDevice){
 
-   DISK_GEOMETRY_EX disk_geometry = {0};
-   DWORD bytesReturned = 0;
-
-   if (DeviceIoControl(
-       hDevice,
-       IOCTL_DISK_GET_DRIVE_GEOMETRY_EX,
-       NULL,
-       0,
-       &disk_geometry,
-       sizeof(disk_geometry),
-       &bytesReturned,
-       NULL
-   )) {
-       uint64_t disk_size_in_bytes = disk_geometry.DiskSize.QuadPart;
-       uint64_t sector_size = disk_geometry.Geometry.BytesPerSector;
-       uint64_t last_lba = (disk_size_in_bytes / sector_size) - 1;
-
-       return last_lba;
-       
-   }else{
-       return 0;
-   }
-
-}
-
+/*
 // 测试代码 - 更新 GPT Header 和 Partition Entry
 void overwrite_GPT_partition_entry(HANDLE hDevice) {
    // 在第一个分区修复分区表
@@ -347,3 +311,4 @@ void InitializeFSINFO(HANDLE hDevice){
 
    };
 }
+*/

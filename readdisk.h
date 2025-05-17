@@ -19,12 +19,115 @@
 #define APFS 0x07
 #define REFS 0x08
 #define UNKN 0x09
-
+#define READDISFAIL 0x0A
 
 #define GPT_ATTR_BASIC_DATA_NORMAL 0x0000000000000000   // 普通可读写FAT32分区
 #define GPT_ATTR_BASIC_DATA_HIDDEN 0x8000000000000000   // 隐藏分区
 #define GPT_ATTR_BASIC_DATA_READONLY 0x1000000000000000 // 只读分区
 #define GPT_ATTR_EFI_SYSTEM_PARTITION 0x8000000000000001// EFI系统分区(通常FAT32格式)
+
+#define BYTE_PER_SECTOR 512
+#define FAT32_SIGNATURE 0xAA55
+
+typedef struct {
+    int code;
+    const char* message;
+} CodeInfo;
+
+const CodeInfo mbrPartitionType[] = {
+    {0x01, "FAT12"},
+    {0x04, "FAT16(<=32MB)"},
+    {0x05, "Extended partition"},
+    {0x06, "FAT16B(>32MB)"},
+    {0x07, "NTFS/exFAT/HPFS"},
+    {0x0B, "FAT32(CHS)"},
+    {0x0C, "FAT32(LBA)"},
+    {0x0E, "FAT16B(LBA)"},
+    {0x0F, "Extended partition"},
+    {0x82, "Linux swap partition"},
+    {0x83, "Linux native partition"},
+    {0xEE, "GPT protective partition"}
+};
+
+char* get_msg_by_code(CodeInfo* list, int code){
+
+    size_t length = sizeof(list) / sizeof(list[0]);
+    for(size_t i=0; i<length; i++) {
+
+        if (list[i].code == code) 
+            return list[i].message;
+
+    }
+
+    return NULL;
+
+}
+
+const CodeInfo errorTable[] = {
+    {0, "Invalid MBR Signiture"},
+    {1, "Invalid GPT signature. It should be EFI PART."},
+    {2, "Unknown partition style, not MBR or GPT."},
+    {3, "MBR partition entries don't contain valid partitions."},
+    {4, "MBR partition - start/end sectors doesn't match size of sectors."},
+    {5, "Cannot get media basic informtion."},
+    {6, "MBR partition - start/end sectors is large than total sectors."},
+    {7, "GPT partition - GPT header size is not 92"},
+    {8, "GPT partition - GPT reserved is not 0"},
+    {9, "GPT partition - my lba is not at the sector 1."},
+    {10, "GPT partition - backup lba is larger than the last lba in the disk."},
+    {11, "GPT partition - the GPT partition entries are used less than 23 sectors"}, 
+    {12, "GPT partition - the size of main GPT partition is different from backup's"},
+    {13, "GPT partition - the partition entries are not followed GPT header"},
+    {14, "GPT partition - the number of partition entries is not 128"},
+    {15, "GPT partition - the GPT header crc is zero"},
+    {16, "GPT partition - the GPT partition entry crc is zero"},
+    {17, "GPT Partition Entry - start lba is larger than end lba"},
+    {18, "GPT Partition Entry - start lba is smaller than first usable lba"},
+    {19, "GPT Partition Entry - end lba is larger than last usable lba"},
+    {20, "GPT Partition Entry Attr - No Block IO set but file-system attributes present"},
+    {21, "GPT Partition Entry Attr - Generic Read-Only conflicts with MS Read-Only"},
+    {22, "GPT Partition Entry Attr - Legacy BIOS Bootable but not marked as Required"},
+    {23, "GPT Partition Entry Attr - Partition is hidden but may be auto-mounted"},
+    {24, "GPT Partition Entry Attr - Reserved bits are set not zero"},
+    {25, "Neither a MBR partition nor a GPT partition."},
+    {26, "FAT32 Boot Sector - Invalid boot sector signature(expected 0xAA55)"}
+    // 可以继续添加
+};
+
+// 错误结构
+typedef struct {
+    CodeInfo error;
+    struct DiskError* next; 
+} DiskError;
+
+typedef struct{
+    DiskError* first_error;
+    DiskError* last_error;
+} DiskErrorList;
+
+// 创建新的DiskErrorList
+DiskErrorList* create_DiskErrorList() {
+    DiskErrorList* error_list = (DiskErrorList*)malloc(sizeof(DiskErrorList));
+    error_list->first_error = error_list->last_error = NULL;
+    return error_list;
+}
+
+// 往DiskErrorList尾端添加新的DiskError
+void append_DiskError(DiskErrorList* l, CodeInfo e) {
+    // 创建新的DiskError节点
+    DiskError* error = (DiskError*)malloc(sizeof(DiskError));
+    error->error = e;
+    error->next = NULL;
+    
+    // 如果错误列表为空
+    if (l->last_error == NULL) {
+        l->first_error = l->last_error = error;
+        return;
+    }
+    
+    l->last_error->next = error;
+    l->last_error = error;
+}
 
 DEFINE_GUID(PARTITION_BASIC_DATA_GUID, 0xebd0a0a2, 0xb9e5, 0x4433, 0x87, 0xc0, 0x68, 0xb6, 0xb7, 0x26, 0x99, 0xc7);
 DEFINE_GUID(PARTITION_ENTRY_UNUSED_GUID, 0x00000000, 0x0000, 0x0000, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00);
@@ -44,7 +147,7 @@ typedef struct {
     unsigned char end_cyl;       // 结束柱面号低8位
     unsigned int start_lba;      // 分区起始LBA(相对扇区号)
     unsigned int size_sectors;   // 分区大小(扇区数)
-} __attribute__((packed)) MBRPartitionEntry;
+} MBRPartitionEntry;
 
 // 保护MBR结构
 typedef struct {
@@ -64,21 +167,21 @@ typedef struct _SCSI_PASS_THROUGH_DIRECT_WITH_BUFFER {
 
 // GPT 分区表头结构（LBA 1）
 typedef struct {
-    uint8_t signature[8];      // "EFI PART"
-    uint32_t revision;
-    uint32_t header_size;
+    uint8_t signature[8];       // "EFI PART"
+    uint32_t revision;          // 修订版本，一般为0
+    uint32_t header_size;       // 分区表头大小，应该为92
     uint32_t header_crc32;
-    uint32_t reserved;
-    uint64_t my_lba;
-    uint64_t alternate_lba;
-    uint64_t first_usable_lba;
-    uint64_t last_usable_lba;
-    uint8_t disk_guid[16];
-    uint64_t partition_entry_lba;
-    uint32_t num_partition_entries;
-    uint32_t partition_entry_size;
-    uint32_t partition_entry_crc32;
-} __attribute__((packed)) GptHeader;
+    uint32_t reserved;          // 必须为0
+    uint64_t my_lba;            // 当前的lba，这个分区表头的位置
+    uint64_t alternate_lba;     // 备份的lba，备份分区表头的位置
+    uint64_t first_usable_lba;  // 第一个可用于分区的lba，主分区表最后一个lba+1
+    uint64_t last_usable_lba;   // 最后一个可用于分区的lba， 备份分区表的第一个lba-1
+    uint8_t disk_guid[16];       
+    uint64_t partition_entry_lba;   // 分区表项起始lba，在主分区表中是2
+    uint32_t num_partition_entries; // 分区表项的数量，windows是128
+    uint32_t partition_entry_size;  // 一个分区表项的大小，一般是128
+    uint32_t partition_entry_crc32; 
+} GptHeader;
 
 // GPT 分区条目结构（每个128字节）
 typedef struct {
@@ -88,7 +191,13 @@ typedef struct {
     uint64_t ending_lba;
     uint64_t attributes;
     uint8_t partition_name[72]; // UTF-16LE
-} __attribute__((packed)) GptPartitionEntry;
+} GptPartitionEntry;
+
+typedef struct{
+    uint16_t entryIndex;            // 记录该分区在partition entry
+    uint64_t bootsector_entry;      // 该分区的起始位置
+    uint64_t filesystem_type;       // 分区文件系统类型
+}bootSectorInfo; 
 
 //FAT32 BootSector
 typedef struct {
@@ -137,6 +246,8 @@ typedef struct {
     BYTE reserved2[12];   // 保留区域
     DWORD trailSig;       // 0x1FE-0x1FF, 结尾签名(必须0x55AA)
 } FAT32_FSINFO;
+
+
 #pragma pack(pop)
 
 // 测试方法
@@ -146,22 +257,31 @@ void InitializeFSINFO(HANDLE hDevice);
 void overwrite_GPT_partition_entry(HANDLE hDevice);
 uint64_t get_last_lba(HANDLE hDevice);
 
-// 读写磁盘方法
+// 通用函数，包括读写磁盘，获取磁盘参数等
 BOOL read_disk_direct(HANDLE hDevice, BYTE buffer[], int posSector, int readSectors);
 BOOL write_disk_direct(HANDLE hDevice, BYTE buffer[], int posSector, int numSectors);
+uint64_t get_last_lba(HANDLE hDevice);
 void print_rawdata(const unsigned char* boot_code, size_t size);
-// 读取MBR分区信息, 并打印有效分区
-int read_MBR_sector(HANDLE hDevice, ProtectiveMBR * mbr, int buffer_size);
-unsigned char check_file_system_from_bootsector(BYTE *buffer);
-void print_partition_type(unsigned char type);
+DWORD cal_crc32(const void* data, size_t length);
+
+// 解析MBR类型的MBA区信息
+int read_parse_MBR_sector(HANDLE hDevice, ProtectiveMBR * mbr, DiskErrorList* errorList);
 int check_disk_partition_style(ProtectiveMBR* mbr);
-void print_MBRPartition_info(const MBRPartitionEntry* part);
-const char* get_partition_type(unsigned char type);
+const char* get_MBRPartition_type(unsigned char type);
+void print_partition_type(unsigned char type);
+int overwrite_MBR_sector(HANDLE hDevice, ProtectiveMBR *mbr);
+
+// 解析GPT类型的GPT区的信息
 void read_parse_GPT_header(HANDLE hDevice, GptHeader *sector);
 void print_parse_gpt_partitions(const GptPartitionEntry *entry, uint32_t count);
 void print_partition_guid_type(const uint8_t binary_guid[16]);
-void parse_partition_data(HANDLE hDevice, int posSector,  int readSectors);
-void parse_FAT32_partition(BYTE * bootSector, FAT32_bootSector * fat32_bootSector);
-BYTE CalculateSectorsPerCluster(DWORD totalSectors);
-DWORD CalculateSectorsPerFAT(DWORD totalSectors, BYTE sectorsPerCluster);
-DWORD CalculateCRC32(const void* data, size_t length);
+unsigned char check_file_system_from_bootsector(BYTE *buffer);
+//void parse_partition_data(HANDLE hDevice, int posSector,  int readSectors);
+
+// 解析FAT32分区的信息
+void read_FAT32_bootsector(HANDLE hDevice, uint64_t startlba, FAT32_bootSector * fat32_bootsector);
+BYTE cal_FAT32_sectors_per_cluster(DWORD totalSectors);
+DWORD cal_FAT32_sectors_per_FAT(DWORD totalSectors, BYTE sectorsPerCluster);
+
+
+

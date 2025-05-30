@@ -1,6 +1,49 @@
 #include "readdisk.h"
+#include "readdisk_globalvar.h"
 
 // 通用函数
+
+// 创建新的DiskErrorList
+DiskErrorList* create_DiskErrorList() {
+    DiskErrorList* error_list = (DiskErrorList*)malloc(sizeof(DiskErrorList));
+    error_list->first_error = error_list->last_error = NULL;
+    return error_list;
+}
+
+// 往DiskErrorList尾端添加新的DiskError
+void append_DiskError(DiskErrorList* l, CodeInfo e) {
+    //printf("append errors:%d",e.code);
+    // 创建新的DiskError节点
+    DiskError* error = (DiskError*)malloc(sizeof(DiskError));
+    error->error = e;
+    error->next = NULL;
+    
+    // 如果错误列表为空
+    if (l->last_error == NULL) {
+        //printf("append first errors.");
+        l->first_error = l->last_error = error;
+        return;
+    }
+    
+    l->last_error->next = error;
+    l->last_error = error;
+}
+
+// 通过code查找message
+const char* get_msg_by_code(const CodeInfo list[], int code){
+    
+    //printf("length of the list: %d/%d=%d\n", sizeof(list), sizeof(list[0]));
+    for(size_t i=1; i<list[0].code; i++) {
+        //printf("get_msg_by_code: %d, %d\n",list[i].code, code);
+        if (list[i].code == code) 
+            return list[i].message;
+
+    }
+
+    return NULL;
+
+}
+
 // 按照起始扇区，结束扇区从磁盘直接读取二进制数据
 BOOL read_disk_direct(
     HANDLE hDevice,  //设备句柄，需要先用CreateFile获取设备句柄
@@ -185,6 +228,26 @@ void print_rawdata(const unsigned char* boot_code, size_t size) {
     }
 }
 
+// 计算CRC32
+DWORD cal_crc32(const void* data, size_t length) {
+    // 动态加载ntdll中的函数
+    typedef DWORD (WINAPI *PCRC32)(DWORD InitialCrc, const BYTE* Buffer, INT Length);
+
+    static PCRC32 pCRC32  = NULL;
+    if (!pCRC32) {
+        HMODULE hNtdll = GetModuleHandleW(L"ntdll.dll");
+        if (hNtdll) {
+            pCRC32  = (PCRC32)GetProcAddress(hNtdll, "RtlComputeCrc32");
+        }
+    }
+
+    if (pCRC32) {
+        return pCRC32(0, (const BYTE*)data, (INT)length);
+    }
+
+    return 0;
+}
+
 // 分析磁盘信息主流程
 // 返回0表示读取磁盘失败
 // 返回1表示分析磁盘完成
@@ -229,12 +292,12 @@ int parse_disk(
 
     }
     // 创建errorList用于记录分析发现的错误
-    errorList = create_DiskErrorList();
+    // errorList = create_DiskErrorList();
 
     // 获取磁盘基本信息
     if (!get_media_info(hDevice, &dge)){
 
-        append_DiskError(errorList, errorTable[5]);
+        append_DiskError(errorList, errorTable[6]);
     }else{
         last_lba = get_last_lba(&dge);
     }
@@ -243,17 +306,19 @@ int parse_disk(
 
     switch (partitionStyle) {
         case 0: // MBR， 继续分析MBRPartition 
+            //printf("Enter swith case 0.");
             validPartitionNum = parse_MBR_partition(mbr.partitions,last_lba, errorList, bs_info);    // 分析MBR结构里的分区表, 并记录错误
             for (int i = 0; i < 4; i++) {
-                read_check_filesystem_from_bootsector(hDevice,mbr.partitions[i].start_lba, &bootsector);
+                read_check_filesystem_from_bootsector(hDevice,mbr.partitions[i].start_lba, bootsector);
             }
+            break;
         case 1: // GPT, 读取并分析GPT Header
             read_parse_GPT_header(hDevice, &gptHeader, errorList, last_lba);
 
-            validPartitionNum = read_parse_GPT_entries(hDevice, &gptPartEntry, &gptHeader, last_lba, errorList, bs_info);
-
+            validPartitionNum = read_parse_GPT_entries(hDevice, &gptHeader, last_lba, gptPartEntry, errorList, bs_info);
+            break;
         default: //其他
-            append_DiskError(errorList, errorTable[25]);
+            append_DiskError(errorList, errorTable[26]);
     }
 
     return 1;
@@ -277,7 +342,7 @@ int read_parse_MBR_sector(
         // 检查MBR签名
         if (mbr->signature != 0xAA55) {
 
-            append_DiskError(errorList, errorTable[0]);
+            append_DiskError(errorList, errorTable[1]);
 
         }
 
@@ -295,7 +360,7 @@ int read_parse_MBR_sector(
                 printf("Disk is formatted with GPT\n");
                 break;
             default:
-                append_DiskError(errorList, errorTable[2]); 
+                append_DiskError(errorList, errorTable[3]); 
         }
         
         return partitionStyle;
@@ -312,10 +377,13 @@ int parse_MBR_partition(
     // 记录有效的partition
     int numValidPartitions = 0;
 
-    for (int i = 0; i < 4; i++) {           
+    for (int i = 0; i < 4; i++) {     
+        
+        printf("part_type: %s\n", get_MBRPartition_type(mbrPartitions[i].part_type));
 
         if (get_MBRPartition_type(mbrPartitions[i].part_type)) {  // 判断是否为有效分区, 如果为NULL则为无效分区               
 
+            printf("Found valid partition.\n");
             uint64_t start_sector = mbrPartitions[i].start_sector&0x3F;
 
             uint64_t start_cyl = (mbrPartitions[i].start_sector&0xC0) << 2;
@@ -325,28 +393,31 @@ int parse_MBR_partition(
             uint64_t end_cyl = (mbrPartitions[i].end_sector&0xC0) << 2;
 
             if ((end_sector - start_sector + 1) != mbrPartitions[i].size_sectors)
-                append_DiskError(errorList, errorTable[4]);
+                append_DiskError(errorList, errorTable[5]);
 
             if  (start_sector > last_lba||end_sector > last_lba)
-                append_DiskError(errorList, errorTable[6]);
+                append_DiskError(errorList, errorTable[7]);
             
             bs_info[numValidPartitions].entryIndex = i;
             bs_info[numValidPartitions].bootsector_entry =  start_sector;
+            bs_info[numValidPartitions].end_sector = end_sector;
+            bs_info[numValidPartitions].size_sector = mbrPartitions[i].size_sectors;
 
             numValidPartitions++; // 有效分区数+1
         }
     }
-
+    printf("num of valid partitios: %d\n", numValidPartitions);
     if (numValidPartitions == 0) 
-        append_DiskError(errorList, errorTable[3]);
+        append_DiskError(errorList, errorTable[4]);
 
     return numValidPartitions;
 
 }
 
 // 解析MBR里分区表的分区类型，如果是GPT分区格式则不适用
-char* get_MBRPartition_type(unsigned char type) {
+const char* get_MBRPartition_type(unsigned char type) {
 
+    //printf("mbrPartitionType size: %d\n", sizeof(mbrPartitionType));
     return get_msg_by_code(mbrPartitionType, (int)type);
 
 }
@@ -397,49 +468,49 @@ void read_parse_GPT_header(
     
         // 检查签名
         if (memcmp(header->signature, "EFI PART", 8) != 0) {
-            append_DiskError(errorList, errorTable[1]);
+            append_DiskError(errorList, errorTable[2]);
         }
 
         if (header->header_size != 92) {
-            append_DiskError(errorList, errorTable[7]);
+            append_DiskError(errorList, errorTable[8]);
         }
 
         // 检查reserved是否为0
         if (header->reserved != 0){
-            append_DiskError(errorList, errorTable[8]);
+            append_DiskError(errorList, errorTable[9]);
         }
 
         // 检查当前EFI PART的位置
         if (header->my_lba != 1){
-            append_DiskError(errorList, errorTable[9]);
-        }
-
-        if (header->alternate_lba > last_lba){
             append_DiskError(errorList, errorTable[10]);
         }
 
-        if (header->first_usable_lba < header-> my_lba + 32) {
+        if (header->alternate_lba > last_lba){
             append_DiskError(errorList, errorTable[11]);
         }
 
-        if (header->first_usable_lba-header->my_lba != last_lba - header->last_usable_lba) {
+        if (header->first_usable_lba < header-> my_lba + 32) {
             append_DiskError(errorList, errorTable[12]);
         }
 
+        if (header->first_usable_lba-header->my_lba != last_lba - header->last_usable_lba) {
+            append_DiskError(errorList, errorTable[13]);
+        }
+
         if (header->partition_entry_lba != header->my_lba+1){
-            append_DiskError(errorList,errorTable[13]);
+            append_DiskError(errorList,errorTable[14]);
         }
 
         if (header->num_partition_entries != 128){
-            append_DiskError(errorList, errorTable[14]);
-        }
-
-        if (header->header_crc32 == 0) {
             append_DiskError(errorList, errorTable[15]);
         }
 
-        if (header->partition_entry_crc32 == 0) {
+        if (header->header_crc32 == 0) {
             append_DiskError(errorList, errorTable[16]);
+        }
+
+        if (header->partition_entry_crc32 == 0) {
+            append_DiskError(errorList, errorTable[17]);
         }
         /*
         printf("----------Start of GPT header-------------------\n");
@@ -473,9 +544,9 @@ void read_parse_GPT_header(
 // 读取GPT partition entries, 并解析记录存在的错误和不一致
 int read_parse_GPT_entries(
     HANDLE hDevice,
-    const GptPartitionEntry* gptPartEntry,
     const GptHeader* header, 
     uint64_t last_lba,
+    GptPartitionEntry* gptPartEntry,        // 用于读取partition entries的缓存
     DiskErrorList* errorList,               // error list结构，指向error list的头
     bootSectorInfo bs_info[]                // 用于记录bootsector位置的数组，以供后期使用
 ){
@@ -483,7 +554,7 @@ int read_parse_GPT_entries(
 
     uint64_t num_of_sectors = header->first_usable_lba-header->my_lba-1;
 
-    if (read_disk_direct(hDevice, gptPartEntry, header->my_lba+1, num_of_sectors )){
+    if (read_disk_direct(hDevice, (BYTE *)gptPartEntry, header->my_lba+1, num_of_sectors )){
         
         for(int i=0;i<header->num_partition_entries;gptPartEntry++, i++){
 
@@ -497,15 +568,15 @@ int read_parse_GPT_entries(
                 valid_part_count++;
                 
                 if (gptPartEntry->starting_lba > gptPartEntry->ending_lba){
-                    append_DiskError(errorList, errorTable[17]);
-                }
-
-                if (gptPartEntry->starting_lba >= header->first_usable_lba){
                     append_DiskError(errorList, errorTable[18]);
                 }
 
-                if (gptPartEntry->ending_lba <= header->last_usable_lba){
+                if (gptPartEntry->starting_lba >= header->first_usable_lba){
                     append_DiskError(errorList, errorTable[19]);
+                }
+
+                if (gptPartEntry->ending_lba <= header->last_usable_lba){
+                    append_DiskError(errorList, errorTable[20]);
                 }
 
                 parse_gptPartEntry_attr(gptPartEntry->attributes,errorList);
@@ -516,8 +587,8 @@ int read_parse_GPT_entries(
     return valid_part_count;
 }
 
-BOOL parse_gptPartEntry_attr(uint64_t attr, DiskErrorList* errorList){
-    BOOL error = FALSE;
+int parse_gptPartEntry_attr(uint64_t attr, DiskErrorList* errorList){
+    int errors = 0;
 
     // 提取通用属性位（48-63）
     uint64_t generic_attrs = (attr >> 48) & 0xFFFF;
@@ -540,42 +611,42 @@ BOOL parse_gptPartEntry_attr(uint64_t attr, DiskErrorList* errorList){
 
     // 检查1: 如果设置了No Block IO，通常不应该有文件系统
     if (no_block_io && (ms_hidden || ms_shadow_copy || ms_readonly)) {
-        append_DiskError(errorList, errorTable[20]);
-        error = TRUE;
+        append_DiskError(errorList, errorTable[21]);
+        errors++;
     }
     
     // 检查2: 通用和MS特定的只读标志是否一致
     if (read_only != ms_readonly) {
-        append_DiskError(errorList, errorTable[21]);
-        error = TRUE;
+        append_DiskError(errorList, errorTable[22]);
+        errors++;
     }
     
     // 检查3: Legacy BIOS可启动分区通常应该是必需的
     if (legacy_bios_bootable && !required_partition) {
-        append_DiskError(errorList, errorTable[22]);
-        error = TRUE;
+        append_DiskError(errorList, errorTable[23]);
+        errors++;
     }
     
     // 检查4: 隐藏和自动挂载的冲突
     if (hidden && !no_automount) {
-        append_DiskError(errorList, errorTable[23]);
-        error = TRUE;
+        append_DiskError(errorList, errorTable[24]);
+        errors++;
     }
     
     // 检查5: 保留位是否被错误设置
     uint64_t reserved_mask = ~(0xFFFFULL << 48 | 0x1ULL << 60 | 0x1ULL << 62 | 0x1ULL << 63);
     if (attr & reserved_mask) {
-        append_DiskError(errorList, errorTable[24]);
-        error = TRUE;
+        append_DiskError(errorList, errorTable[25]);
+        errors++;
     }
 }
 
 // 从bootsector的内容判断文件系统
 // 对于MBR分区，该结果需要和MBR分区表相一致
 unsigned char read_check_filesystem_from_bootsector(
-    HANDLE hDevice,             // 设备句柄,             // 设备句柄
-    uint64_t start_lba,
-    BYTE *buffer
+    HANDLE hDevice,             // 设备句柄,             
+    const uint64_t start_lba,         // 分区的bootsector都扇区号，为该分区的第一个扇区
+    BYTE *buffer                // 读入数据缓存，512 bytes
 ) {
     
     if (read_disk_direct(hDevice, buffer, start_lba, 1)){
@@ -603,21 +674,6 @@ unsigned char read_check_filesystem_from_bootsector(
     
 }                                                                               
 
-// 将bootsector获得的文件系统打印出来
-void print_partition_type(unsigned char type) {
-    switch(type) {
-        case FAT12: printf("FAT12. \n"); return; 
-        case FAT16: printf("FAT16(<=32MB) \n"); return; 
-        case FAT32: printf("FAT32 \n"); return; 
-        case NTFS: printf("NTFS \n"); return; 
-        case EXFAT: printf("exFAT \n"); return;         
-        case LINUX_EXT: printf("Linux Extended partition \n"); return; 
-        case APFS: printf("APFS \n"); return; 
-        case REFS: printf("ReFS \n"); return; 
-        default: printf("Unknown type \n"); return; 
-    }
-}
-
 // 从磁盘的0扇区(sector)判断分区格式是MBR还是GPT
 int check_disk_partition_style(ProtectiveMBR* mbr) {
 
@@ -638,8 +694,9 @@ int check_disk_partition_style(ProtectiveMBR* mbr) {
     return -1; // 未知格式
 }
 
+/*
 // 解析GPT分区条目（GptPartitionEntry），并打印出来
-void print_parse_gpt_partitions(const GptPartitionEntry *entry, uint32_t count) {
+void print_parse_GPT_partitions(const GptPartitionEntry *entry, uint32_t count) {
 
     for (uint32_t i = 0; i < count; i++, entry++) {
 
@@ -684,8 +741,8 @@ void print_parse_gpt_partitions(const GptPartitionEntry *entry, uint32_t count) 
         }
         
     }
-}
-
+}*/
+/*
 // 在解析GPT分区条目（GptPartitionEntry）时，将分区GUID TYPE打印出来
 void print_partition_guid_type(const uint8_t binary_guid[16]){
     GUID guid;
@@ -714,7 +771,7 @@ void print_partition_guid_type(const uint8_t binary_guid[16]){
 
     }
 }
-
+*/
 
 // 分析FAT32分区的boorsector，并解析记录存在的错误和不一致
 int parse_FAT32_bootsector(
@@ -734,6 +791,22 @@ int parse_FAT32_bootsector(
     return error;    
 }
 
+/*
+// 将bootsector获得的文件系统打印出来
+void print_partition_type(unsigned char type) {
+    switch(type) {
+        case FAT12: printf("FAT12. \n"); return; 
+        case FAT16: printf("FAT16(<=32MB) \n"); return; 
+        case FAT32: printf("FAT32 \n"); return; 
+        case NTFS: printf("NTFS \n"); return; 
+        case EXFAT: printf("exFAT \n"); return;         
+        case LINUX_EXT: printf("Linux Extended partition \n"); return; 
+        case APFS: printf("APFS \n"); return; 
+        case REFS: printf("ReFS \n"); return; 
+        default: printf("Unknown type \n"); return; 
+    }
+}
+*/
 // FAT23分区计算每簇扇区数(优化版)
 BYTE cal_FAT32_sectors_per_cluster(DWORD totalSectors) {
     DWORD sizeMB = (totalSectors * 512) / (1024 * 1024);
@@ -753,25 +826,6 @@ DWORD cal_FAT32_sectors_per_FAT(DWORD totalSectors, BYTE sectorsPerCluster) {
     
     // 对齐到簇边界
     return ((fatSize + sectorsPerCluster - 1) / sectorsPerCluster) * sectorsPerCluster;
-}
-
-DWORD cal_crc32(const void* data, size_t length) {
-    // 动态加载ntdll中的函数
-    typedef DWORD (WINAPI *PCRC32)(DWORD InitialCrc, const BYTE* Buffer, INT Length);
-
-    static PCRC32 pCRC32  = NULL;
-    if (!pCRC32) {
-        HMODULE hNtdll = GetModuleHandleW(L"ntdll.dll");
-        if (hNtdll) {
-            pCRC32  = (PCRC32)GetProcAddress(hNtdll, "RtlComputeCrc32");
-        }
-    }
-
-    if (pCRC32) {
-        return pCRC32(0, (const BYTE*)data, (INT)length);
-    }
-
-    return 0;
 }
 
 void parseFATDirectory(BYTE* buffer, DWORD size) {
@@ -803,4 +857,14 @@ void parseFATDirectory(BYTE* buffer, DWORD size) {
         
         printf("文件名: %s\n", name);
     }
+}
+
+void print_info_by_errorcode(int errorCode, diskInfo diskInfo){
+    switch (errorCode) {
+        case 7: //MBR partition - start/end sectors is large than total sectors
+            printf("Start sector:%d, End sector: %d, ",diskInfo.bs_info[]);
+            break;
+        default: 
+    }
+
 }

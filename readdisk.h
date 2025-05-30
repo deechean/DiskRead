@@ -1,3 +1,5 @@
+#pragma once
+
 #include <stdio.h>
 #include <stdint.h>
 #include <locale.h>
@@ -6,7 +8,6 @@
 #include <ntddscsi.h> //SDK里面的头文件
 
 #include <initguid.h>
-
 
 #define SPT_SENSE_LENGTH 32
 
@@ -34,100 +35,16 @@ typedef struct {
     const char* message;
 } CodeInfo;
 
-const CodeInfo mbrPartitionType[] = {
-    {0x01, "FAT12"},
-    {0x04, "FAT16(<=32MB)"},
-    {0x05, "Extended partition"},
-    {0x06, "FAT16B(>32MB)"},
-    {0x07, "NTFS/exFAT/HPFS"},
-    {0x0B, "FAT32(CHS)"},
-    {0x0C, "FAT32(LBA)"},
-    {0x0E, "FAT16B(LBA)"},
-    {0x0F, "Extended partition"},
-    {0x82, "Linux swap partition"},
-    {0x83, "Linux native partition"},
-    {0xEE, "GPT protective partition"}
-};
-
-char* get_msg_by_code(CodeInfo* list, int code){
-
-    size_t length = sizeof(list) / sizeof(list[0]);
-    for(size_t i=0; i<length; i++) {
-
-        if (list[i].code == code) 
-            return list[i].message;
-
-    }
-
-    return NULL;
-
-}
-
-const CodeInfo errorTable[] = {
-    {0, "Invalid MBR Signiture"},
-    {1, "Invalid GPT signature. It should be EFI PART."},
-    {2, "Unknown partition style, not MBR or GPT."},
-    {3, "MBR partition entries don't contain valid partitions."},
-    {4, "MBR partition - start/end sectors doesn't match size of sectors."},
-    {5, "Cannot get media basic informtion."},
-    {6, "MBR partition - start/end sectors is large than total sectors."},
-    {7, "GPT partition - GPT header size is not 92"},
-    {8, "GPT partition - GPT reserved is not 0"},
-    {9, "GPT partition - my lba is not at the sector 1."},
-    {10, "GPT partition - backup lba is larger than the last lba in the disk."},
-    {11, "GPT partition - the GPT partition entries are used less than 23 sectors"}, 
-    {12, "GPT partition - the size of main GPT partition is different from backup's"},
-    {13, "GPT partition - the partition entries are not followed GPT header"},
-    {14, "GPT partition - the number of partition entries is not 128"},
-    {15, "GPT partition - the GPT header crc is zero"},
-    {16, "GPT partition - the GPT partition entry crc is zero"},
-    {17, "GPT Partition Entry - start lba is larger than end lba"},
-    {18, "GPT Partition Entry - start lba is smaller than first usable lba"},
-    {19, "GPT Partition Entry - end lba is larger than last usable lba"},
-    {20, "GPT Partition Entry Attr - No Block IO set but file-system attributes present"},
-    {21, "GPT Partition Entry Attr - Generic Read-Only conflicts with MS Read-Only"},
-    {22, "GPT Partition Entry Attr - Legacy BIOS Bootable but not marked as Required"},
-    {23, "GPT Partition Entry Attr - Partition is hidden but may be auto-mounted"},
-    {24, "GPT Partition Entry Attr - Reserved bits are set not zero"},
-    {25, "Neither a MBR partition nor a GPT partition."},
-    {26, "FAT32 Boot Sector - Invalid boot sector signature(expected 0xAA55)"}
-    // 可以继续添加
-};
-
 // 错误结构
-typedef struct {
+typedef struct diskerror{
     CodeInfo error;
-    struct DiskError* next; 
+    struct diskerror* next; 
 } DiskError;
 
 typedef struct{
     DiskError* first_error;
     DiskError* last_error;
 } DiskErrorList;
-
-// 创建新的DiskErrorList
-DiskErrorList* create_DiskErrorList() {
-    DiskErrorList* error_list = (DiskErrorList*)malloc(sizeof(DiskErrorList));
-    error_list->first_error = error_list->last_error = NULL;
-    return error_list;
-}
-
-// 往DiskErrorList尾端添加新的DiskError
-void append_DiskError(DiskErrorList* l, CodeInfo e) {
-    // 创建新的DiskError节点
-    DiskError* error = (DiskError*)malloc(sizeof(DiskError));
-    error->error = e;
-    error->next = NULL;
-    
-    // 如果错误列表为空
-    if (l->last_error == NULL) {
-        l->first_error = l->last_error = error;
-        return;
-    }
-    
-    l->last_error->next = error;
-    l->last_error = error;
-}
 
 DEFINE_GUID(PARTITION_BASIC_DATA_GUID, 0xebd0a0a2, 0xb9e5, 0x4433, 0x87, 0xc0, 0x68, 0xb6, 0xb7, 0x26, 0x99, 0xc7);
 DEFINE_GUID(PARTITION_ENTRY_UNUSED_GUID, 0x00000000, 0x0000, 0x0000, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00);
@@ -196,6 +113,8 @@ typedef struct {
 typedef struct{
     uint16_t entryIndex;            // 记录该分区在partition entry
     uint64_t bootsector_entry;      // 该分区的起始位置
+    uint64_t end_sector;            // 该分区的结束位置
+    uint64_t size_sector;           // MBR分区表里的记录的包括的分区数
     uint64_t filesystem_type;       // 分区文件系统类型
 }bootSectorInfo; 
 
@@ -247,6 +166,81 @@ typedef struct {
     DWORD trailSig;       // 0x1FE-0x1FF, 结尾签名(必须0x55AA)
 } FAT32_FSINFO;
 
+typedef struct {
+    // 第一部分：BIOS参数块(BPB)
+    BYTE  jmpBoot[3];        // 0x00-0x02，跳转指令
+    BYTE  OEMName[8];        // 0x03-0x0A，OEM标识符("NTFS    ")
+    WORD  bytesPerSector;    // 0x0B-0x0C，每扇区字节数
+    BYTE  sectorsPerCluster; // 0x0D，每簇扇区数
+    WORD  reservedSectors;   // 0x0E-0x0F，保留扇区数
+    BYTE  zero1[5];          // 0x10-0x14，未使用(置零)
+    BYTE  mediaType;         // 0x15，介质描述符
+    WORD  zero2;             // 0x16-0x17，未使用(置零)
+    WORD  sectorsPerTrack;   // 0x18-0x19，每磁道扇区数
+    WORD  numHeads;          // 0x1A-0x1B，磁头数
+    DWORD hiddenSectors;     // 0x1C-0x1F，隐藏扇区数(分区起始LBA)
+    DWORD zero3;             // 0x20-0x23，未使用(置零)
+    
+    // 第二部分：NTFS扩展BPB
+    DWORD totalSectors64;    // 0x24-0x27，分区总扇区数(64位)
+    DWORD mftClusterNum;     // 0x28-0x2B，$MFT的簇号
+    DWORD mftMirrClusterNum; // 0x2C-0x2F，$MFTMirr的簇号
+    BYTE  clustersPerMFT;    // 0x30，每MFT记录簇数
+    BYTE  zero4[3];          // 0x31-0x33，未使用(置零)
+    BYTE  clustersPerIndex;  // 0x34，每索引块簇数
+    BYTE  zero5[3];          // 0x35-0x37，未使用(置零)
+    BYTE  volumeSerial[8];   // 0x38-0x3F，卷序列号
+    
+    // 第三部分：引导代码和签名
+    BYTE  bootCode[426];     // 0x40-0x1FD，引导代码
+    WORD  signature;         // 0x1FE-0x1FF，引导扇区签名(0xAA55)
+} NTFS_bootSector;
+
+typedef struct {
+    // 第一部分：BIOS参数块(BPB)
+    BYTE  jmpBoot[3];       // 0x00-0x02，跳转指令(如0xEB, 0x3C, 0x90)
+    BYTE  OEMName[8];       // 0x03-0x0A，格式化的OEM名称(通常"MSDOS5.0")
+    WORD  bytesPerSector;   // 0x0B-0x0C，每扇区字节数(通常512)
+    BYTE  sectorsPerCluster;// 0x0D，每簇扇区数
+    WORD  reservedSectors;  // 0x0E-0x0F，保留扇区数(通常1)
+    BYTE  numFATs;          // 0x10，FAT表数量(通常2)
+    WORD  rootEntries;      // 0x11-0x12，根目录条目数(通常512)
+    WORD  totalSectors16;   // 0x13-0x14，分区总扇区数(≤65535)
+    BYTE  mediaType;        // 0x15，介质描述符(0xF8表示固定磁盘)
+    WORD  sectorsPerFAT16;  // 0x16-0x17，每个FAT表占用的扇区数
+    WORD  sectorsPerTrack;  // 0x18-0x19，每磁道扇区数(通常63)
+    WORD  numHeads;         // 0x1A-0x1B，磁头数(通常255)
+    DWORD hiddenSectors;    // 0x1C-0x1F，分区前隐藏的扇区数
+    DWORD totalSectors32;   // 0x20-0x23，如果totalSectors16为0则使用此值
+    
+    // 第二部分：FAT16扩展BPB(与FAT32不同部分)
+    BYTE  driveNumber;      // 0x24，驱动器号(0x80表示第一个硬盘)
+    BYTE  reserved1;        // 0x25，保留(Windows NT使用)
+    BYTE  bootSig;          // 0x26，扩展引导签名(0x29)
+    DWORD volumeID;         // 0x27-0x2A，卷序列号
+    BYTE  volumeLabel[11];  // 0x2B-0x35，卷标("NO NAME    ")
+    BYTE  fsType[8];        // 0x36-0x3D，文件系统类型("FAT16   ")
+    
+    // 第三部分：引导代码和签名
+    BYTE  bootCode[448];    // 0x3E-0x1FD，引导代码
+    WORD  signature;        // 0x1FE-0x1FF，引导扇区签名(0xAA55)
+} FAT16_bootSector;
+
+typedef struct {
+    DISK_GEOMETRY_EX dge;       // 磁盘基本信息
+    uint64_t last_lba;          // 磁盘最后个扇区号
+
+    ProtectiveMBR mbr;          // MBR结构信息
+    int partitionStyle;         // 磁盘使用的分区类型，MBR或GPT
+    GptHeader gptHeader;        // gptHeader结构信息
+    GptPartitionEntry gptPartEntry[128]; // GPT partition entry最多允许128个
+    int validPartitionNum;      // 有效分区的个数
+
+    // bootsector数据
+    bootSectorInfo bs_info[128];   // 用于记录分区的位置和文件系统类型
+    BYTE bootsector[512];          // 用于存储分区的boot sector数据
+
+} diskInfo;
 
 #pragma pack(pop)
 
@@ -255,33 +249,54 @@ void read_disk(HANDLE hDevice, BYTE * buffer, int buffer_size, char driveLetter)
 void ovewrite_partition_bootsector(HANDLE hDevice);
 void InitializeFSINFO(HANDLE hDevice);
 void overwrite_GPT_partition_entry(HANDLE hDevice);
-uint64_t get_last_lba(HANDLE hDevice);
+
+// ErrorList相关操作
+DiskErrorList* create_DiskErrorList();
+void append_DiskError(DiskErrorList* l, CodeInfo e);
+const char* get_msg_by_code(const CodeInfo list[], int code); 
+
+
+// 磁盘分析主流程
+int parse_disk(char driveLetter, DiskErrorList* errorList);
 
 // 通用函数，包括读写磁盘，获取磁盘参数等
 BOOL read_disk_direct(HANDLE hDevice, BYTE buffer[], int posSector, int readSectors);
 BOOL write_disk_direct(HANDLE hDevice, BYTE buffer[], int posSector, int numSectors);
-uint64_t get_last_lba(HANDLE hDevice);
+BOOL get_media_info(HANDLE hDevice, DISK_GEOMETRY_EX* pdge);
 void print_rawdata(const unsigned char* boot_code, size_t size);
 DWORD cal_crc32(const void* data, size_t length);
+uint64_t get_last_lba(DISK_GEOMETRY_EX* pdge);
 
 // 解析MBR类型的MBA区信息
 int read_parse_MBR_sector(HANDLE hDevice, ProtectiveMBR * mbr, DiskErrorList* errorList);
+int parse_MBR_partition(const MBRPartitionEntry mbrPartitions[], const uint64_t last_lba, DiskErrorList* errorList, bootSectorInfo bs_info[]);
 int check_disk_partition_style(ProtectiveMBR* mbr);
 const char* get_MBRPartition_type(unsigned char type);
-void print_partition_type(unsigned char type);
+//void print_partition_type(unsigned char type);
 int overwrite_MBR_sector(HANDLE hDevice, ProtectiveMBR *mbr);
 
 // 解析GPT类型的GPT区的信息
-void read_parse_GPT_header(HANDLE hDevice, GptHeader *sector);
-void print_parse_gpt_partitions(const GptPartitionEntry *entry, uint32_t count);
-void print_partition_guid_type(const uint8_t binary_guid[16]);
+void read_parse_GPT_header(HANDLE hDevice, GptHeader *sector, DiskErrorList* errorList, uint64_t last_lba);
+int read_parse_GPT_entries(HANDLE hDevice,const GptHeader* header, uint64_t last_lba,
+    GptPartitionEntry* gptPartEntry, DiskErrorList* errorList, bootSectorInfo bs_info[]);
+int parse_gptPartEntry_attr(uint64_t attr, DiskErrorList* errorList);
+// void print_parse_GPT_partitions(const GptPartitionEntry *entry, uint32_t count);
+// void print_partition_guid_type(const uint8_t binary_guid[16]);
 unsigned char check_file_system_from_bootsector(BYTE *buffer);
 //void parse_partition_data(HANDLE hDevice, int posSector,  int readSectors);
 
+// 解析分区bootsector
+unsigned char read_check_filesystem_from_bootsector(HANDLE hDevice, const uint64_t start_lba, BYTE *buffer);
+
 // 解析FAT32分区的信息
-void read_FAT32_bootsector(HANDLE hDevice, uint64_t startlba, FAT32_bootSector * fat32_bootsector);
+int parse_FAT32_bootsector(FAT32_bootSector * fat32_bootsector, DiskErrorList* errorList);
 BYTE cal_FAT32_sectors_per_cluster(DWORD totalSectors);
 DWORD cal_FAT32_sectors_per_FAT(DWORD totalSectors, BYTE sectorsPerCluster);
 
+// 解析NTFS分区的信息
+int parse_NTFS_bootsector(NTFS_bootSector* ntfs_bootsector, DiskErrorList* errorList);
+
+// 解析FAT分区的信息
+int parse_FAT_bootsector(FAT16_bootSector* fat16_bootsector, DiskErrorList* errorList);
 
 

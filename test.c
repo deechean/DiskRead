@@ -4,33 +4,24 @@
 // 测试代码 - 主程序
 void main() {
     char driveLetter = 'D';
+
     HANDLE hDevice;
+    DiskErrorList errorList;
+
+    errorList.first_error = errorList.last_error = NULL;
     
-    //用sprintf构建device path
-    char devicePath[10];
-    sprintf(devicePath, "\\\\.\\%c:", driveLetter);
-    
-    //用CreateFile来打开输入的盘符
-    hDevice = CreateFile(
-        devicePath, 
-        GENERIC_READ | GENERIC_WRITE, 
-        FILE_SHARE_READ | FILE_SHARE_WRITE, 
-        NULL, 
-        OPEN_EXISTING, 
-        0, 
-        NULL
-    );
+    parse_disk(driveLetter, &errorList);
 
-    if (hDevice == INVALID_HANDLE_VALUE) {
+    int index = 0;
+    DiskError *p = errorList.first_error;
 
-        printf("Failed to open the drive %c\n", driveLetter);
-        return;
+    printf("Print found errors: \n");
 
+    if (p){
+        //printf("Print errors.");
+        printf("error %d, %s", index++, p->error.message);
+        p = p->next;
     }
-
-    
-
-    int partitionStyle = read_MBR_sector(hDevice, &mbr, sizeof(ProtectiveMBR));
 
     // ProtectiveMBR mbr_modified;
 
